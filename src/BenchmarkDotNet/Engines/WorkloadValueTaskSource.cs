@@ -34,7 +34,13 @@ public sealed class WorkloadValueTaskSource : IValueTaskSource<ClockSpan>, IValu
     }
 
     public void SetException(Exception exception)
-        => clockSpanSource.SetException(exception);
+    {
+        clockSpanSource.SetException(exception);
+        // Reset so __GlobalCleanup's unconditional Complete() can safely SetResult(true)
+        // even after the workload threw and left continuerSource signaled with the
+        // last Continue() result.
+        continuerSource.Reset();
+    }
 
     ValueTaskSourceStatus IValueTaskSource<bool>.GetStatus(short token)
         => continuerSource.GetStatus(token);

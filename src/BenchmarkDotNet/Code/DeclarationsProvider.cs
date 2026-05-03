@@ -17,6 +17,7 @@ namespace BenchmarkDotNet.Code
         protected static readonly string StartClockSyncCode = $"{typeof(StartedClock).GetCorrectCSharpTypeName()} startedClock = {typeof(ClockExtensions).GetCorrectCSharpTypeName()}.Start(clock);";
         protected static readonly string ReturnSyncCode = $"return new {CoreReturnType}(startedClock.GetElapsed());";
         private static readonly string ReturnCompletedValueTask = $"return new {typeof(ValueTask).GetCorrectCSharpTypeName()}();";
+        private enum ExtraImplKind { None, GlobalSetup, GlobalCleanup }
 
         protected BenchmarkCase Benchmark { get; } = benchmark;
         protected Descriptor Descriptor => Benchmark.Descriptor;
@@ -25,57 +26,60 @@ namespace BenchmarkDotNet.Code
 
         public SmartStringBuilder ReplaceTemplate(SmartStringBuilder smartStringBuilder)
         {
-            Replace(smartStringBuilder, Descriptor.GlobalSetupMethod, "$GlobalSetupModifiers$", "$GlobalSetupImpl$", false);
-            Replace(smartStringBuilder, Descriptor.GlobalCleanupMethod, "$GlobalCleanupModifiers$", "$GlobalCleanupImpl$", true);
-            Replace(smartStringBuilder, Descriptor.IterationSetupMethod, "$IterationSetupModifiers$", "$IterationSetupImpl$", false);
-            Replace(smartStringBuilder, Descriptor.IterationCleanupMethod, "$IterationCleanupModifiers$", "$IterationCleanupImpl$", false);
+            Replace(smartStringBuilder, Descriptor.GlobalSetupMethod, "$GlobalSetupModifiers$", "$GlobalSetupImpl$", ExtraImplKind.GlobalSetup);
+            Replace(smartStringBuilder, Descriptor.GlobalCleanupMethod, "$GlobalCleanupModifiers$", "$GlobalCleanupImpl$", ExtraImplKind.GlobalCleanup);
+            Replace(smartStringBuilder, Descriptor.IterationSetupMethod, "$IterationSetupModifiers$", "$IterationSetupImpl$", ExtraImplKind.None);
+            Replace(smartStringBuilder, Descriptor.IterationCleanupMethod, "$IterationCleanupModifiers$", "$IterationCleanupImpl$", ExtraImplKind.None);
             return ReplaceCore(smartStringBuilder)
                 .Replace("$DisassemblerEntryMethodImpl$", GetWorkloadMethodCall(GetPassArgumentsDirect()))
                 .Replace("$OperationsPerInvoke$", Descriptor.OperationsPerInvoke.ToString())
                 .Replace("$WorkloadTypeName$", Descriptor.Type.GetCorrectCSharpTypeName());
         }
 
-        private void Replace(SmartStringBuilder smartStringBuilder, MethodInfo? method, string replaceModifiers, string replaceImpl, bool isGlobalCleanup)
+        private void Replace(SmartStringBuilder smartStringBuilder, MethodInfo? method, string replaceModifiers, string replaceImpl, ExtraImplKind extraImplKind)
         {
             string modifier;
-            string impl;
+            string userImpl;
+            bool needsExplicitReturn;
             if (method == null)
             {
                 modifier = string.Empty;
-                impl = ReturnCompletedValueTask;
-                if (isGlobalCleanup)
-                {
-                    impl = PrependExtraGlobalCleanupImpl(impl);
-                }
-                smartStringBuilder
-                    .Replace(replaceModifiers, modifier)
-                    .Replace(replaceImpl, impl);
-                return;
+                userImpl = string.Empty;
+                needsExplicitReturn = true;
             }
-
-            if (method.ReturnType.IsAwaitable())
+            else if (method.ReturnType.IsAwaitable())
             {
                 modifier = "async";
-                impl = $"await {GetMethodPrefix(method)}.{method.Name}();";
+                userImpl = $"await {GetMethodPrefix(method)}.{method.Name}();";
+                needsExplicitReturn = false;
             }
             else
             {
                 modifier = string.Empty;
-                impl = $"""
-                {GetMethodPrefix(method)}.{method.Name}();
-                            {ReturnCompletedValueTask}
-                """;
+                userImpl = $"{GetMethodPrefix(method)}.{method.Name}();";
+                needsExplicitReturn = true;
             }
-            if (isGlobalCleanup)
+
+            string explicitReturn = needsExplicitReturn ? ReturnCompletedValueTask : string.Empty;
+            string impl = extraImplKind switch
             {
-                impl = PrependExtraGlobalCleanupImpl(impl);
-            }
+                // Append auto-generated setup code after user setup code.
+                ExtraImplKind.GlobalSetup => CombineLines(userImpl, GetExtraGlobalSetupImpl(), explicitReturn),
+                // Prepend auto-generated cleanup code before user cleanup code.
+                ExtraImplKind.GlobalCleanup => CombineLines(GetExtraGlobalCleanupImpl(), userImpl, explicitReturn),
+                _ => CombineLines(userImpl, explicitReturn),
+            };
+
             smartStringBuilder
                 .Replace(replaceModifiers, modifier)
                 .Replace(replaceImpl, impl);
         }
 
-        protected abstract string PrependExtraGlobalCleanupImpl(string impl);
+        private static string CombineLines(params string[] parts)
+            => string.Join($"{Environment.NewLine}            ", parts.Where(p => !string.IsNullOrEmpty(p)));
+
+        protected virtual string GetExtraGlobalSetupImpl() => string.Empty;
+        protected virtual string GetExtraGlobalCleanupImpl() => string.Empty;
 
         protected abstract SmartStringBuilder ReplaceCore(SmartStringBuilder smartStringBuilder);
 
@@ -96,8 +100,6 @@ namespace BenchmarkDotNet.Code
     internal class SyncDeclarationsProvider(BenchmarkCase benchmark) : DeclarationsProvider(benchmark)
     {
         public override string[] GetExtraFields() => [];
-
-        protected override string PrependExtraGlobalCleanupImpl(string impl) => impl;
 
         protected override SmartStringBuilder ReplaceCore(SmartStringBuilder smartStringBuilder)
         {
@@ -182,11 +184,14 @@ namespace BenchmarkDotNet.Code
             "public long invokeCount;"
         ];
 
-        protected override string PrependExtraGlobalCleanupImpl(string impl)
-            => $"""
-            this.__fieldsContainer.workloadContinuerAndValueTaskSource?.Complete();
-                        {impl}
+        protected override string GetExtraGlobalSetupImpl()
+            => $$"""
+            this.__fieldsContainer.workloadContinuerAndValueTaskSource = new {{typeof(WorkloadValueTaskSource).GetCorrectCSharpTypeName()}}();
+                        this.__StartWorkload();
             """;
+
+        protected override string GetExtraGlobalCleanupImpl()
+            => "this.__fieldsContainer.workloadContinuerAndValueTaskSource.Complete();";
 
         protected override SmartStringBuilder ReplaceCore(SmartStringBuilder smartStringBuilder)
         {
@@ -222,11 +227,8 @@ namespace BenchmarkDotNet.Code
                     {
                         this.__fieldsContainer.invokeCount = invokeCount;
                         this.__fieldsContainer.clock = clock;
-                        if (this.__fieldsContainer.workloadContinuerAndValueTaskSource == null)
-                        {
-                            this.__fieldsContainer.workloadContinuerAndValueTaskSource = new {{typeof(WorkloadValueTaskSource).GetCorrectCSharpTypeName()}}();
-                            this.__StartWorkload();
-                        }
+                        // The source is allocated and the workload loop started in __GlobalSetup,
+                        // so this hot path is branchless and allocation-free.
                         return this.__fieldsContainer.workloadContinuerAndValueTaskSource.Continue();
                     }
 
