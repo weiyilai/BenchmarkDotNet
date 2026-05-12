@@ -544,18 +544,21 @@ public class BenchmarkActionValueTask<T> : BenchmarkActionBase
 }
 
 [AggressivelyOptimizeMethods]
-public class BenchmarkActionConfiguredCancelableAsyncEnumerable<T> : BenchmarkActionBase
+public class BenchmarkActionAsyncEnumerable<T> : BenchmarkActionBase
+#if NET9_0_OR_GREATER
+    where T : allows ref struct
+#endif
 {
-    private readonly Func<ConfiguredCancelableAsyncEnumerable<T>> callback;
+    private readonly Func<IAsyncEnumerable<T>> callback;
     private readonly int unrollFactor;
     private WorkloadValueTaskSource workloadValueTaskSource = null!;
     private IClock? clock;
     private long invokeCount;
 
     [SetsRequiredMembers]
-    public BenchmarkActionConfiguredCancelableAsyncEnumerable(object? instance, MethodInfo method, int unrollFactor)
+    public BenchmarkActionAsyncEnumerable(object? instance, MethodInfo method, int unrollFactor)
     {
-        callback = CreateWorkload<Func<ConfiguredCancelableAsyncEnumerable<T>>>(instance, method);
+        callback = CreateWorkload<Func<IAsyncEnumerable<T>>>(instance, method);
         this.unrollFactor = unrollFactor;
         InvokeSingle = InvokeOnce;
         InvokeUnroll = WorkloadActionUnroll;
@@ -623,18 +626,21 @@ public class BenchmarkActionConfiguredCancelableAsyncEnumerable<T> : BenchmarkAc
 }
 
 [AggressivelyOptimizeMethods]
-public class BenchmarkActionAsyncEnumerable<T> : BenchmarkActionBase
+public class BenchmarkActionConfiguredCancelableAsyncEnumerable<T> : BenchmarkActionBase
+#if NET10_0_OR_GREATER
+    where T : allows ref struct
+#endif
 {
-    private readonly Func<IAsyncEnumerable<T>> callback;
+    private readonly Func<ConfiguredCancelableAsyncEnumerable<T>> callback;
     private readonly int unrollFactor;
     private WorkloadValueTaskSource workloadValueTaskSource = null!;
     private IClock? clock;
     private long invokeCount;
 
     [SetsRequiredMembers]
-    public BenchmarkActionAsyncEnumerable(object? instance, MethodInfo method, int unrollFactor)
+    public BenchmarkActionConfiguredCancelableAsyncEnumerable(object? instance, MethodInfo method, int unrollFactor)
     {
-        callback = CreateWorkload<Func<IAsyncEnumerable<T>>>(instance, method);
+        callback = CreateWorkload<Func<ConfiguredCancelableAsyncEnumerable<T>>>(instance, method);
         this.unrollFactor = unrollFactor;
         InvokeSingle = InvokeOnce;
         InvokeUnroll = WorkloadActionUnroll;
