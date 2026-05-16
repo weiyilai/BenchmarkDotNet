@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Diagnosers;
 using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Environments;
 using BenchmarkDotNet.Exporters;
@@ -278,6 +279,135 @@ namespace BenchmarkDotNet.Tests.Exporters
             }
 
             return;
+        }
+
+        [Fact]
+        public async Task MemoryDiagnoser_ExportsAllocatedBytesPerOperation()
+        {
+            var config = new ManualConfig().AddDiagnoser(MemoryDiagnoser.Default);
+            var summary = new Summary(
+                "MemoryDiagnoserSummary",
+                [
+                    new BenchmarkReport(
+                        success: true,
+                        benchmarkCase: new BenchmarkCase(
+                            new Descriptor(MockFactory.MockType, MockFactory.MockMethodInfo),
+                            Job.Dry,
+                            new ParameterInstances([]),
+                            ImmutableConfigBuilder.Create(config)),
+                        null!,
+                        null!,
+                        [
+                            new ExecuteResult(
+                                [
+                                    new Measurement(0, IterationMode.Workload, IterationStage.Result, 4, 4, 40)
+                                ],
+                                GcStats.Parse("// GC: 1 2 3 65536 4"))
+                        ],
+                        [
+                            new Metric(AllocatedMemoryMetricDescriptor.Instance, 16384),
+                            new(new FakeMetricDescriptor("label", "label"), 42.0)
+                        ])
+                ],
+                HostEnvironmentInfo.GetCurrent(),
+                "",
+                "",
+                TimeSpan.Zero,
+                CultureInfo.InvariantCulture,
+                [],
+                []);
+
+            var logger = new AccumulationLogger();
+
+            await ((ExporterBase)OpenMetricsExporter.Default).ExportToLogAsync(summary, logger, CancellationToken.None);
+
+            var settings = VerifyHelper.Create();
+            await Verifier.Verify(logger.GetLog(), settings);
+        }
+
+        [Fact]
+        public async Task MemoryDiagnoser_WithoutAllocationData_ExportsAllocatedBytesAsNaN()
+        {
+            var config = new ManualConfig().AddDiagnoser(MemoryDiagnoser.Default);
+            var summary = new Summary(
+                "MemoryDiagnoserNoAllocationDataSummary",
+                [
+                    new BenchmarkReport(
+                        success: true,
+                        benchmarkCase: new BenchmarkCase(
+                            new Descriptor(MockFactory.MockType, MockFactory.MockMethodInfo),
+                            Job.Dry,
+                            new ParameterInstances([]),
+                            ImmutableConfigBuilder.Create(config)),
+                        null!,
+                        null!,
+                        [
+                            new ExecuteResult(
+                                [
+                                    new Measurement(0, IterationMode.Workload, IterationStage.Result, 1, 1, 10)
+                                ],
+                                GcStats.Empty)
+                        ],
+                        [
+                            new Metric(AllocatedMemoryMetricDescriptor.Instance, double.NaN)
+                        ])
+                ],
+                HostEnvironmentInfo.GetCurrent(),
+                "",
+                "",
+                TimeSpan.Zero,
+                CultureInfo.InvariantCulture,
+                [],
+                []);
+
+            var logger = new AccumulationLogger();
+
+            await ((ExporterBase)OpenMetricsExporter.Default).ExportToLogAsync(summary, logger, CancellationToken.None);
+
+            var log = logger.GetLog();
+            Assert.Contains("# HELP benchmark_allocated_bytes Allocated managed memory per single benchmark operation.", log);
+            Assert.Contains("benchmark_allocated_bytes{method=\"Foo\", type=\"MockBenchmarkClass\"} NaN", log);
+        }
+
+        [Fact]
+        public async Task WithoutMemoryDiagnoser_CustomAllocatedBytesMetricIsNotSuppressed()
+        {
+            var summary = new Summary(
+                "CustomAllocatedBytesMetricSummary",
+                [
+                    new BenchmarkReport(
+                        success: true,
+                        benchmarkCase: new BenchmarkCase(
+                            new Descriptor(MockFactory.MockType, MockFactory.MockMethodInfo),
+                            Job.Dry,
+                            new ParameterInstances([]),
+                            ImmutableConfigBuilder.Create(new ManualConfig())),
+                        null!,
+                        null!,
+                        [
+                            new ExecuteResult([
+                                new Measurement(0, IterationMode.Workload, IterationStage.Result, 1, 1, 10)
+                            ])
+                        ],
+                        [
+                            new(new FakeMetricDescriptor("allocated_bytes", "allocated bytes"), 42.0)
+                        ])
+                ],
+                HostEnvironmentInfo.GetCurrent(),
+                "",
+                "",
+                TimeSpan.Zero,
+                CultureInfo.InvariantCulture,
+                [],
+                []);
+
+            var logger = new AccumulationLogger();
+
+            await ((ExporterBase)OpenMetricsExporter.Default).ExportToLogAsync(summary, logger, CancellationToken.None);
+
+            var log = logger.GetLog();
+            Assert.Contains("# HELP benchmark_allocated_bytes Additional metric allocated_bytes", log);
+            Assert.Contains("benchmark_allocated_bytes{method=\"Foo\", type=\"MockBenchmarkClass\"} 42", log);
         }
     }
 }

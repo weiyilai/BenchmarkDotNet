@@ -1,3 +1,4 @@
+using BenchmarkDotNet.Diagnosers;
 using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Extensions;
 using BenchmarkDotNet.Helpers;
@@ -29,20 +30,28 @@ public class OpenMetricsExporter : ExporterBase
             var gcStats = report.GcStats;
             var descriptor = benchmark.Descriptor;
             var parameters = benchmark.Parameters;
+            bool hasMemoryDiagnoser = benchmark.Config.HasMemoryDiagnoser();
+            double? allocatedBytesPerOperation = hasMemoryDiagnoser
+                ? gcStats.GetBytesAllocatedPerOperation(benchmark)
+                : null;
+            if (hasMemoryDiagnoser && !allocatedBytesPerOperation.HasValue)
+            {
+                allocatedBytesPerOperation = double.NaN;
+            }
 
             var stats = report.ResultStatistics;
             var metrics = report.Metrics;
             if (stats == null)
                 continue;
 
-            AddCommonMetrics(metricsSet, descriptor, parameters, stats, gcStats);
-            AddAdditionalMetrics(metricsSet, metrics, descriptor, parameters);
+            AddCommonMetrics(metricsSet, descriptor, parameters, stats, gcStats, allocatedBytesPerOperation);
+            AddAdditionalMetrics(metricsSet, metrics, descriptor, parameters, skipAllocatedMemoryMetric: hasMemoryDiagnoser, reserveMemoryMetricNames: hasMemoryDiagnoser);
         }
 
         await WriteMetricsAsync(writer, metricsSet, cancellationToken).ConfigureAwait(false);
     }
 
-    private static void AddCommonMetrics(HashSet<OpenMetric> metricsSet, Descriptor descriptor, ParameterInstances parameters, Statistics stats, GcStats gcStats)
+    private static void AddCommonMetrics(HashSet<OpenMetric> metricsSet, Descriptor descriptor, ParameterInstances parameters, Statistics stats, GcStats gcStats, double? allocatedBytesPerOperation)
     {
         metricsSet.AddRange([
             // Mean
@@ -72,42 +81,6 @@ public class OpenMetricsExporter : ExporterBase
                 descriptor,
                 parameters,
                 stats.StandardDeviation),
-            // GC Stats Gen0 - these are counters, not gauges
-            OpenMetric.FromStatistics(
-                $"{MetricPrefix}gc_gen0_collections_total",
-                "Total number of Gen 0 garbage collections during the benchmark execution.",
-                "counter",
-                "",
-                descriptor,
-                parameters,
-                gcStats.Gen0Collections),
-            // GC Stats Gen1
-            OpenMetric.FromStatistics(
-                $"{MetricPrefix}gc_gen1_collections_total",
-                "Total number of Gen 1 garbage collections during the benchmark execution.",
-                "counter",
-                "",
-                descriptor,
-                parameters,
-                gcStats.Gen1Collections),
-            // GC Stats Gen2
-            OpenMetric.FromStatistics(
-                $"{MetricPrefix}gc_gen2_collections_total",
-                "Total number of Gen 2 garbage collections during the benchmark execution.",
-                "counter",
-                "",
-                descriptor,
-                parameters,
-                gcStats.Gen2Collections),
-            // Total GC Operations
-            OpenMetric.FromStatistics(
-                $"{MetricPrefix}gc_total_operations_total",
-                "Total number of garbage collection operations during the benchmark execution.",
-                "counter",
-                "",
-                descriptor,
-                parameters,
-                gcStats.TotalOperations),
             // P90 - in nanoseconds
             OpenMetric.FromStatistics(
                 $"{MetricPrefix}p90_nanoseconds",
@@ -127,25 +100,85 @@ public class OpenMetricsExporter : ExporterBase
                 parameters,
                 stats.Percentiles.P95)
         ]);
+
+        if (allocatedBytesPerOperation.HasValue)
+        {
+            // GC Stats Gen0 - these are counters, not gauges
+            metricsSet.Add(OpenMetric.FromStatistics(
+                $"{MetricPrefix}gc_gen0_collections_total",
+                "Total number of Gen 0 garbage collections during the benchmark execution.",
+                "counter",
+                "",
+                descriptor,
+                parameters,
+                gcStats.Gen0Collections));
+
+            // GC Stats Gen1
+            metricsSet.Add(OpenMetric.FromStatistics(
+                $"{MetricPrefix}gc_gen1_collections_total",
+                "Total number of Gen 1 garbage collections during the benchmark execution.",
+                "counter",
+                "",
+                descriptor,
+                parameters,
+                gcStats.Gen1Collections));
+
+            // GC Stats Gen2
+            metricsSet.Add(OpenMetric.FromStatistics(
+                $"{MetricPrefix}gc_gen2_collections_total",
+                "Total number of Gen 2 garbage collections during the benchmark execution.",
+                "counter",
+                "",
+                descriptor,
+                parameters,
+                gcStats.Gen2Collections));
+
+            // Total GC Operations
+            metricsSet.Add(OpenMetric.FromStatistics(
+                $"{MetricPrefix}gc_total_operations_total",
+                "Total number of garbage collection operations during the benchmark execution.",
+                "counter",
+                "",
+                descriptor,
+                parameters,
+                gcStats.TotalOperations));
+
+            metricsSet.Add(OpenMetric.FromStatistics(
+                $"{MetricPrefix}allocated_bytes",
+                "Allocated managed memory per single benchmark operation.",
+                "gauge",
+                "bytes",
+                descriptor,
+                parameters,
+                allocatedBytesPerOperation.Value));
+        }
     }
 
-    private static void AddAdditionalMetrics(HashSet<OpenMetric> metricsSet, IReadOnlyDictionary<string, Metric> metrics, Descriptor descriptor, ParameterInstances parameters)
+    private static void AddAdditionalMetrics(HashSet<OpenMetric> metricsSet, IReadOnlyDictionary<string, Metric> metrics, Descriptor descriptor, ParameterInstances parameters, bool skipAllocatedMemoryMetric, bool reserveMemoryMetricNames)
     {
         var reservedMetricNames = new HashSet<string>
         {
             $"{MetricPrefix}execution_time_nanoseconds",
             $"{MetricPrefix}error_nanoseconds",
             $"{MetricPrefix}stddev_nanoseconds",
-            $"{MetricPrefix}gc_gen0_collections_total",
-            $"{MetricPrefix}gc_gen1_collections_total",
-            $"{MetricPrefix}gc_gen2_collections_total",
-            $"{MetricPrefix}gc_total_operations_total",
             $"{MetricPrefix}p90_nanoseconds",
             $"{MetricPrefix}p95_nanoseconds"
         };
 
+        if (reserveMemoryMetricNames)
+        {
+            reservedMetricNames.Add($"{MetricPrefix}gc_gen0_collections_total");
+            reservedMetricNames.Add($"{MetricPrefix}gc_gen1_collections_total");
+            reservedMetricNames.Add($"{MetricPrefix}gc_gen2_collections_total");
+            reservedMetricNames.Add($"{MetricPrefix}gc_total_operations_total");
+            reservedMetricNames.Add($"{MetricPrefix}allocated_bytes");
+        }
+
         foreach (var metric in metrics)
         {
+            if (skipAllocatedMemoryMetric && metric.Value.Descriptor is AllocatedMemoryMetricDescriptor)
+                continue;
+
             string metricName = SanitizeMetricName(metric.Key);
             string fullMetricName = $"{MetricPrefix}{metricName}";
 
@@ -246,7 +279,6 @@ public class OpenMetricsExporter : ExporterBase
             return new OpenMetric(fullMetricName, help, type, "", labels, metric.Value.Value);
         }
 
-        private static readonly Dictionary<string, string> NormalizedLabelKeyCache = [];
         private static string NormalizeLabelKey(string key)
         {
             string normalized = new(key
