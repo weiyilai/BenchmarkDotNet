@@ -36,12 +36,13 @@
     <ProjectReference Include="..\..\src\BenchmarkDotNet\BenchmarkDotNet.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="..\BenchmarkDotNet.Tests\Shared\**\*.cs" Link="Shared\%(RecursiveDir)%(Filename)%(Extension)"/>
+    <Compile Include="..\BenchmarkDotNet.Tests\Shared\**\*.cs" Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="AwesomeAssertions" Version="9.4.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="[2.8.2]">
       <PrivateAssets>all</PrivateAssets>
